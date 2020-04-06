@@ -1,0 +1,284 @@
+---
+title: "Exploration of Netflix dataset with Plotly in R"
+author: "Mykyta Zharov"
+date: "4/2/2020"
+output:
+  rmarkdown::html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plotly)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+```
+
+## Overview
+
+In what follows I am going to do an exploratory data analysis of the Netflix data set, which can be found here - https://www.kaggle.com/shivamb/netflix-shows . This dataset consists of tv shows and movies available on Netflix as of year 2019. The dataset was collected from Flixable which is a third-party Netflix search engine. The aim of this document is to give insights about the dataset through visualisations made with Plotly package for R.
+
+
+
+## Exploratory data analysis
+
+### Data reading
+Let us start be loading the dataset and printing out six first rows. 
+
+```{r}
+#read dataset
+titles=read.csv(file = 'netflix_titles.csv', na.strings = c("NA", ""), stringsAsFactors=F)
+head(titles)
+```
+
+
+
+In the dataset there are 6234 observations of 12 following variables describing the tv shows and movies:
+
+* show_id - Unique ID for every Movie / Tv Show
+* type - Identifier - A Movie or TV Show
+* title - Title of the Movie / Tv Show
+* director - Director of the Movie
+* cast - Actors involved in the movie / show
+* country - Country where the movie / show was produced
+* date_added - Date it was added on Netflix
+* release_year - Actual Release year of the move / show
+* rating - TV Rating of the movie / show
+* duration - Total Duration - in minutes or number of seasons
+* listed_in - Genere
+* description - The summary description
+
+### Data cleaning
+As a first step we can remove uninformative variables from the dataset. In our case it is a show_id varaible. The description variable will not be used for the exploratory data analysis, but can be used to find similar movies and tv shows using the text similarities un the further analysis, that is out of scope for this time.
+
+```{r}
+#drop show_id column
+titles = subset(titles, select = -c(show_id) )
+```
+We check if we have missing values in the dataset.
+```{r}
+#print number of missing values for each variable
+data.frame("variable"=c(colnames(titles)), "missing values count"=sapply(titles, function(x) sum(is.na(x))), row.names=NULL)
+```
+From the above output we see that we have missing values for variables director, cast, country, data_added and rating. Since rating is the categorical variable with 14 levels we can fill in (approximate) the missing values for rating with a mode.
+```{r}
+#function to find a mode
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+titles$rating[is.na(titles$rating)] <- getmode(titles$rating)
+```
+
+We can change the date format of the data_added varible for easier manipulations further.
+```{r}
+titles$date_added <- as.Date(titles$date_added, format = "%B %d, %Y")
+```
+
+The missing values for the variables director, cast and country, date_added can not be easily approximated, so for now we are going to continue without filling them. We are going to drop the missing values, at point where it will be necessary. We also drop duplicated rows in the dataset based on the title, country, type, release_year variables.
+
+```{r}
+#drop duplicated rows based on the title, country, type and release_year
+titles=distinct(titles,title,country,type,release_year, .keep_all= TRUE)
+```
+
+We have done the data cleaning steps and can continue with exploring the data.
+
+### Data visualisation
+
+
+```{r}
+amount_by_type <- titles %>% group_by(type) %>% summarise(
+  count = n()
+)
+
+fig1 <- plot_ly(amount_by_type, labels = ~type, values = ~count, type = 'pie', marker = list(colors = c("#bd3939", "#399ba3")))
+fig1 <- fig1 %>% layout(title = 'Amount Of Netflix Content By Type',
+         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+fig1
+```
+
+As we see from above there are more than 2 times more Movies than TV Shows on Netflix.
+
+Since many movies and tv shows are made by several countries (country variable), to correctly count the total amount of content produced by each country we need to split strings in country variable and count the total occurence of each country on its own.
+```{r}
+s <- strsplit(titles$country, split = ", ")
+titles_countries_fuul <- data.frame(type = rep(titles$type, sapply(s, length)), country = unlist(s))
+titles_countries_fuul$country <- as.character(gsub(",","",titles_countries_fuul$country))
+
+amount_by_country <- na.omit(titles_countries_fuul) %>%
+  group_by(country, type) %>%
+  summarise(count = n())
+w <- reshape(data=data.frame(amount_by_country),idvar="country",
+                          v.names = "count",
+                          timevar = "type",
+                          direction="wide") %>% arrange(desc(count.Movie)) %>%
+                          top_n(10)
+names(w)[2] <- "count_movie"
+names(w)[3] <- "count_tv_show"
+w <- w[order(desc(w$count_movie+w$count_tv_show)),] 
+
+fig <- plot_ly(w, x = w$country, y = ~count_movie, type = 'bar', name = 'Movie', marker = list(color = '#bd3939'))
+fig <- fig %>% add_trace(y = ~count_tv_show, name = 'TV Show',marker = list(color = '#399ba3'))
+fig <- fig %>% layout(xaxis=list(categoryorder = "array", categoryarray = w$country, title="Country"), yaxis = list(title = 'Amount of content'), barmode = 'stack', title = 'Top 11 Countries By The Amount Of The Produced Content')
+
+fig
+```
+
+We see that the United States is a clear leader in the amount of content on Netflix. Countries as Japan, South Korea and Taiwan have more TV Shows than Movies on Neflix.  
+
+```{r}
+df_by_date_full <- titles %>% group_by(date_added) %>% summarise(added_today = n()) %>% 
+  mutate(total_number_of_content = cumsum(added_today), type = "Total")
+
+df_by_date <- titles %>% group_by(date_added,type) %>% summarise(added_today = n()) %>% 
+            ungroup() %>% group_by(type) %>% mutate(total_number_of_content = cumsum(added_today))
+
+full_data<- rbind(as.data.frame(df_by_date_full), as.data.frame(df_by_date))
+
+fig4 <- plot_ly(full_data, x = ~date_added, y = ~total_number_of_content, color = ~type, type = 'scatter', mode = 'lines', colors=c("#bd3939",  "#9addbd", "#399ba3")) 
+fig4 <- fig4 %>% layout(yaxis = list(title = 'Count'), xaxis = list(title = 'Date'), title="Amout Of Content As A Function Of Time")
+
+
+
+
+fig4
+
+```
+
+From above we see that starting from the year 2016 the total amount of content was growing exponentially. We also notice how fast the amount of movies on Netflix overcame the amount of TV Shows.
+
+```{r}
+df_by_date_full_2 <- titles %>% group_by(month_added=floor_date(date_added, "month"), type) %>%  summarise(added_today = n())
+wd <- reshape(data=data.frame(df_by_date_full_2),idvar="month_added",
+                          v.names = "added_today",
+                          timevar = "type",
+                          direction="wide")
+
+names(wd)[2] <- "added_today_movie"
+names(wd)[3] <- "added_today_tv_show"
+wd$added_today_movie[is.na(wd$added_today_movie)] <- 0
+wd$added_today_tv_show[is.na(wd$added_today_tv_show)] <- 0
+wd <-na.omit(wd)
+
+
+fig <- plot_ly(wd, x = wd$month_added, y = ~added_today_movie, type = 'bar', name = 'Movie', marker = list(color = '#bd3939'))
+fig <- fig %>% add_trace(y = ~added_today_tv_show, name = 'TV Show', marker = list(color = '#399ba3'))
+fig <- fig %>% layout(xaxis=list(categoryorder = "array", categoryarray = wd$month_added, title="Date"), yaxis = list(title = 'Count'), barmode = 'stack', title="Amount Of Content Added Per Month")
+
+fig
+
+```
+
+We can see from above that November 2019 was a peak month for Netflix for the amount of added content.
+
+Let us have a look at a distribution of content by rating classes.
+
+```{r}
+df_by_rating_only_full <- titles %>% group_by(rating) %>% summarise(count = n())
+fig6 <- plot_ly(df_by_rating_only_full, labels = ~rating, values = ~count, type = 'pie')
+fig6 <- fig6 %>% layout(title = 'Amount Of Content By Rating',
+         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+fig6
+```
+
+
+
+```{r}
+df_by_rating_full <- titles %>% group_by(rating, type) %>% summarise(count = n())
+w2 <- reshape(data=data.frame(df_by_rating_full),idvar="rating",
+                          v.names = "count",
+                          timevar = "type",
+                          direction="wide") %>% arrange(desc(count.Movie)) %>%
+                          top_n(10)
+names(w2)[2] <- "count_movie"
+names(w2)[3] <- "count_tv_show"
+w2 <- w2[order(desc(w2$count_movie+w2$count_tv_show)),] 
+
+
+fig5 <- plot_ly(w2, x = w2$rating, y = ~count_movie, type = 'bar', name = 'Movie', marker = list(color = '#bd3939'))
+fig5 <- fig5 %>% add_trace(y = ~count_tv_show, name = 'TV Show', marker = list(color = '#399ba3') )
+fig5 <- fig5 %>% layout(xaxis=list(categoryorder = "array", categoryarray = w2$rating, title="Rating"), yaxis = list(title = 'Count'), barmode = 'stack', title="Amount of Content By Rating (Movie vs. TV Show)")
+
+fig5
+```
+
+
+
+```{r}
+s3 <- strsplit(titles$listed_in, split = ", ")
+titles_listed_in <- data.frame(type = rep(titles$type, sapply(s3, length)), listed_in = unlist(s3))
+titles_listed_in$listed_in <- as.character(gsub(",","",titles_listed_in$listed_in))
+
+df_by_listed_in_full <- titles_listed_in %>% group_by(listed_in) %>% summarise(count = n()) %>%
+  arrange(desc(count)) %>% top_n(20)
+
+fig7 <- plot_ly(df_by_listed_in_full, x = ~listed_in, y = ~count, type = 'bar', marker = list(color = '#aaaaaa'))
+fig7 <- fig7 %>% layout(xaxis=list(categoryorder = "array", categoryarray = df_by_listed_in_full$listed_in, title="Genre"), yaxis = list(title = 'Count'), title="20 Top Genres On Netflix")
+
+fig7
+
+
+```
+
+
+```{r, message=FALSE}
+
+movies_by_duration_country<-na.omit(titles[titles$type=="Movie",][,c("country", "duration")])
+s4 <- strsplit(movies_by_duration_country$country, split = ", ")
+movies_by_duration_country_full <- data.frame(duration = rep(movies_by_duration_country$duration, sapply(s4, length)), country = unlist(s4))
+movies_by_duration_country_full$duration <- as.numeric(gsub(" min","", movies_by_duration_country_full$duration))
+
+movies_by_duration_country_full_subset<-movies_by_duration_country_full[movies_by_duration_country_full$country %in% c("United States", "India", "United Kingdom", "Canada", "France", "Japan", "Spain", "South Korea", "Mexico", "Australia", "Taiwan"),]
+
+
+fig8 <- plot_ly(movies_by_duration_country_full_subset, y = ~duration, color = ~country, type = "box")
+fig8 <- fig8 %>% layout(xaxis=list(title="Country"), yaxis = list(title = 'Duration (in min)'), 
+        title="Box-Plots Of Movie Duration In Top 11 Countries")
+
+fig8
+
+
+```
+
+It can be seen from above that movies produced in India tend to be the longest on average with the average duration of 127 min.
+
+Top 20 directors by the amount of content on Netflix:
+
+```{r}
+
+s5 <- strsplit(titles$director, split = ", ")
+titles_director <- data.frame(type = rep(titles$type, sapply(s5, length)), director = unlist(s5))
+titles_director$director <- as.character(gsub(",","",titles_director$director))
+titles_director<-na.omit(titles_director) %>%  group_by(director)  %>% summarise(count = n()) %>% arrange(desc(count)) %>% top_n(20)
+titles_director<-as.data.frame(titles_director)
+titles_director
+
+
+```
+
+Top 20 actors by the amount of content on Netflix in the films made in the United States:
+
+```{r}
+
+s6 <- strsplit(titles[titles$country=="United States",]$cast, split = ", ")
+titles_actor <- data.frame(type = rep(titles[titles$country=="United States",]$type, sapply(s6, length)), actor = unlist(s6))
+titles_actor$actor <- as.character(gsub(",","",titles_actor$actor))
+titles_actor<-na.omit(titles_actor) %>%  group_by(actor)  %>% summarise(count = n()) %>% arrange(desc(count)) %>% top_n(20)
+titles_actor<-as.data.frame(titles_actor)
+titles_actor
+
+```
+
+
+Of course there are still many ways how one can explore and look at the data. This is just a brief example using Plotly package in R. It is really interesting to try to find similar movies based on the description variable, but it is a topic for another project. 
+
